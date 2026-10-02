@@ -99,3 +99,4 @@ class MonteCarloPFEResult:
     peak_tenor_years: float
     profile: List[PFEProfilePoint]
     computation_time_ms: float
+    backend: str = "Python (NumPy Vectorized)"

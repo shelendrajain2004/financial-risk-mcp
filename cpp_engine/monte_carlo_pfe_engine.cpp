@@ -1,6 +1,6 @@
 /**
  * High-Performance Multithreaded Monte Carlo Peak Forward Exposure (PFE) Engine in C++17/C++20.
- * Demonstrates high-throughput numerical risk simulation for quantitative trading infrastructure.
+ * Exports both an extern "C" ABI for direct Python ctypes binding and a standalone benchmark CLI.
  */
 
 #include <iostream>
@@ -13,13 +13,15 @@
 #include <iomanip>
 #include <numeric>
 
-struct PFEPoint {
-    double tenor;
-    double expected_exposure;
-    double pfe_95;
-    double pfe_97_5;
-    double pfe_99;
-};
+extern "C" {
+    struct C_PFEPoint {
+        double tenor;
+        double expected_exposure;
+        double pfe_95;
+        double pfe_97_5;
+        double pfe_99;
+    };
+}
 
 class MonteCarloPFESimulator {
 public:
@@ -35,7 +37,7 @@ public:
         initial_mtm_(initial_mtm),
         notional_(notional) {}
 
-    std::vector<PFEPoint> run_simulation(const std::vector<double>& tenors, int num_threads = 0) {
+    std::vector<C_PFEPoint> run_simulation(const std::vector<double>& tenors, int num_threads = 0) {
         if (num_threads <= 0) {
             num_threads = std::max(1u, std::thread::hardware_concurrency());
         }
@@ -51,7 +53,6 @@ public:
             int end_path = (t_idx == num_threads - 1) ? num_simulations_ : start_path + paths_per_thread;
 
             workers.emplace_back([this, &tenors, &global_exposures, start_path, end_path, t_idx]() {
-                // Thread-local RNG with unique seed
                 std::mt19937_64 rng(1337 + t_idx * 997);
                 std::normal_distribution<double> norm_dist(0.0, 1.0);
 
@@ -64,20 +65,16 @@ public:
                         double dt = t - prev_t;
                         prev_t = t;
 
-                        // Mean-reverting Ornstein-Uhlenbeck / Hull-White short rate increment
                         double drift = current_x * std::exp(-mean_reversion_ * dt);
                         double var = (volatility_ * volatility_ / (2.0 * mean_reversion_)) * (1.0 - std::exp(-2.0 * mean_reversion_ * dt));
                         double diffusion = std::sqrt(std::max(0.0, var)) * norm_dist(rng);
 
                         current_x = drift + diffusion;
 
-                        // Exposure valuation with maturity roll-off factor
                         double maturity = 10.0;
                         double active_weight = std::max(0.0, (maturity - t) / maturity);
                         double mtm = initial_mtm_ * active_weight + current_x * notional_ * active_weight * 0.1;
-                        double exposure = std::max(0.0, mtm);
-
-                        global_exposures[step][p] = exposure;
+                        global_exposures[step][p] = std::max(0.0, mtm);
                     }
                 }
             });
@@ -87,8 +84,7 @@ public:
             if (w.joinable()) w.join();
         }
 
-        // Aggregate quantiles across steps
-        std::vector<PFEPoint> results;
+        std::vector<C_PFEPoint> results;
         results.reserve(num_steps);
 
         for (size_t step = 0; step < num_steps; ++step) {
@@ -122,6 +118,36 @@ private:
     double notional_;
 };
 
+// C-ABI Exported Function for Python ctypes
+extern "C" {
+    int run_monte_carlo_pfe_c(
+        int num_simulations,
+        double mean_reversion,
+        double volatility,
+        double initial_mtm,
+        double notional,
+        const double* tenors,
+        int num_tenors,
+        int num_threads,
+        C_PFEPoint* out_results
+    ) {
+        if (!tenors || !out_results || num_tenors <= 0 || num_simulations <= 0) {
+            return -1;
+        }
+
+        std::vector<double> tenors_vec(tenors, tenors + num_tenors);
+        MonteCarloPFESimulator simulator(num_simulations, mean_reversion, volatility, initial_mtm, notional);
+        auto res = simulator.run_simulation(tenors_vec, num_threads);
+
+        for (int i = 0; i < num_tenors; ++i) {
+            out_results[i] = res[i];
+        }
+
+        return 0;
+    }
+}
+
+#ifndef BUILD_SHARED_LIB
 int main(int argc, char* argv[]) {
     std::cout << "=================================================================\n";
     std::cout << " High-Performance C++20 Multithreaded Monte Carlo PFE Risk Engine\n";
@@ -181,3 +207,4 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
+#endif

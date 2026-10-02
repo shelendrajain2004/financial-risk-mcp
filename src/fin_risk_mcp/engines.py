@@ -1,9 +1,13 @@
 """Quantitative Risk Engines: SA-CCR, Monte Carlo PFE, VaR, and Greeks.
 Adheres strictly to Basel III / BCBS 279 regulatory standards and quantitative finance formulations.
+Includes native C++20 acceleration binding via ctypes with seamless Python/NumPy fallback.
 """
 
+import os
 import math
 import time
+import ctypes
+import logging
 from typing import List, Dict, Tuple, Optional
 import numpy as np
 
@@ -16,6 +20,53 @@ from .models import (
     PFEProfilePoint,
     MonteCarloPFEResult,
 )
+
+logger = logging.getLogger("fin_risk_mcp")
+
+
+# C-ABI structure matching C++ C_PFEPoint
+class C_PFEPoint(ctypes.Structure):
+    _fields_ = [
+        ("tenor", ctypes.c_double),
+        ("expected_exposure", ctypes.c_double),
+        ("pfe_95", ctypes.c_double),
+        ("pfe_97_5", ctypes.c_double),
+        ("pfe_99", ctypes.c_double),
+    ]
+
+
+def _load_cpp_pfe_library() -> Optional[ctypes.CDLL]:
+    """Attempts to locate and load the compiled C++ shared library."""
+    candidate_paths = [
+        os.path.join(os.path.dirname(__file__), "..", "..", "cpp_engine", "libmontecarlo_pfe.so"),
+        os.path.join(os.getcwd(), "cpp_engine", "libmontecarlo_pfe.so"),
+        os.path.join(os.getcwd(), "libmontecarlo_pfe.so"),
+    ]
+    for path in candidate_paths:
+        abs_path = os.path.abspath(path)
+        if os.path.exists(abs_path):
+            try:
+                lib = ctypes.CDLL(abs_path)
+                lib.run_monte_carlo_pfe_c.argtypes = [
+                    ctypes.c_int,                  # num_simulations
+                    ctypes.c_double,               # mean_reversion
+                    ctypes.c_double,               # volatility
+                    ctypes.c_double,               # initial_mtm
+                    ctypes.c_double,               # notional
+                    ctypes.POINTER(ctypes.c_double), # tenors
+                    ctypes.c_int,                  # num_tenors
+                    ctypes.c_int,                  # num_threads
+                    ctypes.POINTER(C_PFEPoint),    # out_results
+                ]
+                lib.run_monte_carlo_pfe_c.restype = ctypes.c_int
+                logger.info(f"Loaded Native C++ PFE Engine from: {abs_path}")
+                return lib
+            except Exception as e:
+                logger.warning(f"Found {abs_path} but failed to load ctypes binding: {e}")
+    return None
+
+
+CPP_PFE_LIB = _load_cpp_pfe_library()
 
 
 class SACCREngine:
@@ -58,7 +109,6 @@ class SACCREngine:
         if trade.strike is None or trade.underlying_price is None or trade.volatility is None:
             return 1.0
 
-        # Black-Scholes Delta with supervisory volatility adjustment
         s = trade.underlying_price
         k = trade.strike
         t = max(trade.maturity_years, 0.001)
@@ -76,17 +126,13 @@ class SACCREngine:
 
     @classmethod
     def compute_replacement_cost(cls, netting_set: NettingSet) -> float:
-        """Calculates Replacement Cost (RC):
-        Unmargined: RC = max(V - C, 0)
-        Margined:   RC = max(V - C, TH + MTA - NICA, 0)
-        """
+        """Calculates Replacement Cost (RC)."""
         v = netting_set.net_market_value
         c = netting_set.collateral_posted
 
         if not netting_set.is_margined:
             return max(v - c, 0.0)
 
-        # Margined formula under BCBS 279
         threshold_buffer = (
             netting_set.threshold + netting_set.minimum_transfer_amount
         )
@@ -115,16 +161,12 @@ class SACCREngine:
             for trade in trades:
                 delta = cls.compute_supervisory_delta(trade)
                 if asset_class == AssetClass.INTEREST_RATE:
-                    # Apply supervisory duration factor for IR
                     sd = cls.supervisory_duration(0.0, max(trade.maturity_years, 0.1))
                     eff_notional = delta * abs(trade.notional) * sd
                 else:
                     eff_notional = delta * abs(trade.notional)
                 effective_notionals.append(eff_notional)
 
-            # Netting aggregation within hedging set
-            # Formula: SF * sqrt((sum(D_i))^2 + (1 - rho^2) * sum(D_i^2))
-            # Conservative regulatory summation
             net_d = sum(effective_notionals)
             rho = cls.SUPERVISORY_CORRELATIONS[asset_class]
             gross_d2 = sum(d ** 2 for d in effective_notionals)
@@ -141,7 +183,6 @@ class SACCREngine:
         rc = cls.compute_replacement_cost(netting_set)
         total_addon, breakdown = cls.compute_addon(netting_set)
 
-        # Multiplier = min(1.0, 0.05 + 0.95 * exp((V - C) / (2 * 0.95 * AddOn)))
         v = netting_set.net_market_value
         c = netting_set.collateral_posted
 
@@ -150,7 +191,6 @@ class SACCREngine:
             pfe = 0.0
         else:
             exponent = (v - c) / (2.0 * 0.95 * total_addon)
-            # Clip exponent to avoid overflow
             exponent = max(min(exponent, 50.0), -50.0)
             multiplier = min(1.0, 0.05 + 0.95 * math.exp(exponent))
             pfe = multiplier * total_addon
@@ -171,7 +211,7 @@ class SACCREngine:
 
 class MonteCarloPFEEngine:
     """High-Performance Monte Carlo Peak Forward Exposure (PFE) Simulator.
-    Simulates multi-tenor risk profiles up to 30 years using vectorized NumPy diffusion.
+    Seamlessly uses native multithreaded C++20 core if compiled; falls back to vectorized NumPy.
     """
 
     DEFAULT_TENORS = [0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0]
@@ -188,18 +228,68 @@ class MonteCarloPFEEngine:
         random_seed: int = 42,
     ) -> MonteCarloPFEResult:
         """Simulates portfolio value distributions across tenors and computes PFE profiles."""
-        start_time = time.perf_counter()
         tenors = tenors or cls.DEFAULT_TENORS
         num_steps = len(tenors)
-
-        rng = np.random.default_rng(random_seed)
-
-        # Total portfolio current MTM and notional scale
         total_notional = sum(abs(t.notional) for t in trades) or 1000000.0
         current_mtm = sum(t.market_value for t in trades)
 
-        # Vectorized Hull-White / Ornstein-Uhlenbeck state diffusion paths
-        # Shape: (num_simulations, num_steps)
+        # 1. Native C++ execution path if compiled DSO is available
+        global CPP_PFE_LIB
+        if CPP_PFE_LIB is None:
+            CPP_PFE_LIB = _load_cpp_pfe_library()
+
+        if CPP_PFE_LIB is not None:
+            try:
+                start_time = time.perf_counter()
+                tenors_arr = (ctypes.c_double * num_steps)(*tenors)
+                out_results = (C_PFEPoint * num_steps)()
+
+                ret = CPP_PFE_LIB.run_monte_carlo_pfe_c(
+                    num_simulations,
+                    mean_reversion,
+                    volatility,
+                    current_mtm,
+                    total_notional,
+                    tenors_arr,
+                    num_steps,
+                    0,  # 0 = auto-detect hardware threads
+                    out_results,
+                )
+                if ret == 0:
+                    profile_points = []
+                    peak_pfe = 0.0
+                    peak_tenor = 0.0
+                    for pt in out_results:
+                        if pt.pfe_97_5 > peak_pfe:
+                            peak_pfe = pt.pfe_97_5
+                            peak_tenor = pt.tenor
+                        profile_points.append(
+                            PFEProfilePoint(
+                                tenor_years=pt.tenor,
+                                expected_exposure=round(pt.expected_exposure, 2),
+                                pfe_95=round(pt.pfe_95, 2),
+                                pfe_97_5=round(pt.pfe_97_5, 2),
+                                pfe_99=round(pt.pfe_99, 2),
+                            )
+                        )
+                    duration_ms = (time.perf_counter() - start_time) * 1000.0
+                    return MonteCarloPFEResult(
+                        portfolio_id=portfolio_id,
+                        num_simulations=num_simulations,
+                        num_time_steps=num_steps,
+                        peak_pfe_97_5=round(peak_pfe, 2),
+                        peak_tenor_years=peak_tenor,
+                        profile=profile_points,
+                        computation_time_ms=round(duration_ms, 2),
+                        backend="C++20 Multithreaded Core (libmontecarlo_pfe.so)",
+                    )
+            except Exception as e:
+                logger.warning(f"Native C++ PFE execution encountered error, falling back to NumPy: {e}")
+
+        # 2. Vectorized NumPy fallback path
+        start_time = time.perf_counter()
+        rng = np.random.default_rng(random_seed)
+
         dt = np.diff(np.array([0.0] + tenors))
         diffusion_paths = np.zeros((num_simulations, num_steps))
 
@@ -212,26 +302,22 @@ class MonteCarloPFEEngine:
             )
             diffusion_paths[:, i] = current_x
 
-        # Vectorized MTM valuation per tenor based on remaining maturity of trades
         profile_points: List[PFEProfilePoint] = []
         peak_pfe = 0.0
         peak_tenor = 0.0
 
         for idx, t in enumerate(tenors):
-            # Amortization factor: trades amortize or expire as tenor increases
             active_weights = np.array([
                 max(0.0, (tr.maturity_years - t) / max(tr.maturity_years, 0.1))
                 for tr in trades
             ])
             total_active_weight = np.sum(active_weights) / max(len(trades), 1)
 
-            # Simulated MTM distribution at tenor t
             simulated_mtm = (
                 current_mtm * total_active_weight
                 + diffusion_paths[:, idx] * total_notional * total_active_weight * 0.1
             )
 
-            # Exposure is max(V(t), 0)
             positive_exposure = np.maximum(simulated_mtm, 0.0)
 
             ee = float(np.mean(positive_exposure))
@@ -263,6 +349,7 @@ class MonteCarloPFEEngine:
             peak_tenor_years=peak_tenor,
             profile=profile_points,
             computation_time_ms=round(duration_ms, 2),
+            backend="Python (NumPy Vectorized)",
         )
 
 
@@ -286,12 +373,10 @@ class VaREngine:
     ) -> Dict[str, float]:
         """Parametric VaR and Expected Shortfall (CVaR)."""
         z = cls.Z_SCORES.get(confidence_level, 2.32635)
-        # Scaled volatility for horizon
         scaled_vol = daily_volatility * math.sqrt(horizon_days)
 
         var = portfolio_value * z * scaled_vol
 
-        # Expected Shortfall (CVaR) for normal distribution: ES = PV * vol * (pdf(z) / (1 - alpha))
         phi_z = (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * (z ** 2))
         es = portfolio_value * scaled_vol * (phi_z / (1.0 - confidence_level))
 

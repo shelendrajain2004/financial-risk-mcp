@@ -1,6 +1,6 @@
 """Model Context Protocol (MCP) Server for Quantitative Financial Risk.
 Implements MCP 2024-11-05 JSON-RPC 2.0 specification over standard I/O (stdio).
-Zero external runtime dependencies beyond standard Python 3.10+ and NumPy.
+Directly connects to Native C++20 multithreaded simulation core with NumPy fallback.
 """
 
 import sys
@@ -11,7 +11,6 @@ from typing import Dict, Any, List, Optional
 from .models import AssetClass, DerivativeTrade, NettingSet, OptionType
 from .engines import SACCREngine, MonteCarloPFEEngine, VaREngine, GreeksEngine
 
-# Configure logging to stderr so stdout remains strictly reserved for MCP JSON-RPC
 logging.basicConfig(
     stream=sys.stderr,
     level=logging.INFO,
@@ -20,7 +19,6 @@ logging.basicConfig(
 logger = logging.getLogger("fin_risk_mcp")
 
 
-# In-memory mock regulatory & portfolio benchmark data
 BENCHMARK_PORTFOLIO = [
     DerivativeTrade(
         trade_id="IR-SWAP-001",
@@ -145,8 +143,8 @@ class FinancialRiskMCPServer:
             {
                 "name": "simulate_monte_carlo_pfe",
                 "description": (
-                    "Executes a vectorized Monte Carlo simulation to project Potential Future "
-                    "Exposure (PFE) profiles and Peak Forward Exposure across multi-year tenors (0.25y to 30y)."
+                    "Executes high-performance Monte Carlo simulation (using native C++20 multithreaded core) "
+                    "to project Potential Future Exposure (PFE) profiles and Peak Forward Exposure across multi-year tenors (0.25y to 30y)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -448,6 +446,7 @@ class FinancialRiskMCPServer:
 
                 summary = (
                     f"### Monte Carlo PFE Profile: {pfe_res.portfolio_id}\n\n"
+                    f"* **Engine Backend:** `{pfe_res.backend}`\n"
                     f"* **Simulations:** {pfe_res.num_simulations:,} paths\n"
                     f"* **Peak Forward Exposure (97.5%):** ${pfe_res.peak_pfe_97_5:,.2f} USD at **{pfe_res.peak_tenor_years:.2f} years**\n"
                     f"* **Execution Runtime:** {pfe_res.computation_time_ms:.2f} ms\n\n"

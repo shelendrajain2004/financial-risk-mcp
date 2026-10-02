@@ -1,4 +1,5 @@
 """Sample client showing how an LLM agent communicates with the Financial Risk MCP Server over stdio.
+Directly invokes both SA-CCR calculations and the high-performance native C++ Monte Carlo PFE simulation.
 """
 
 import sys
@@ -86,8 +87,34 @@ def main():
             },
         },
     })
-    print("\n--- Agent Response ---")
+    print("\n--- Agent Response 1: SA-CCR ---")
     print(saccr_res["result"]["content"][0]["text"])
+
+    # 4. Call High-Performance Monte Carlo PFE Simulation (Invokes Native C++ Engine)
+    print("\nExecuting Monte Carlo PFE Simulation (100,000 paths across 30y tenors via C++ Engine)...")
+    pfe_res = send_request({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "simulate_monte_carlo_pfe",
+            "arguments": {
+                "portfolio_id": "PORT-DERIVATIVES-GLOBAL",
+                "num_simulations": 100000,
+                "trades": [
+                    {
+                        "trade_id": "IRS-5Y-EURIBOR",
+                        "asset_class": "INTEREST_RATE",
+                        "notional": 100_000_000.0,
+                        "market_value": 4_200_000.0,
+                        "maturity_years": 10.0,
+                    }
+                ],
+            },
+        },
+    })
+    print("\n--- Agent Response 2: Monte Carlo PFE (Native C++) ---")
+    print(pfe_res["result"]["content"][0]["text"])
 
     proc.terminate()
     proc.wait()
