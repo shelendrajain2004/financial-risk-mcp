@@ -1,0 +1,37 @@
+name: CI Suite
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test-and-benchmark:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install numpy
+
+    - name: Run Python MCP Server Unit Tests
+      run: |
+        PYTHONPATH=src python -m unittest discover tests -v
+
+    - name: Build & Run C++ Monte Carlo Engine
+      run: |
+        g++ -O3 -std=c++17 cpp_engine/monte_carlo_pfe_engine.cpp -pthread -o cpp_engine/pfe_benchmark
+        ./cpp_engine/pfe_benchmark 100000
+
+    - name: Verify End-to-End MCP Stdio Client
+      run: |
+        PYTHONPATH=src python examples/sample_client.py
