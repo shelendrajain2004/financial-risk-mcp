@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "financial-risk-engine": {
+      "command": "python3",
+      "args": ["-m", "fin_risk_mcp.server"],
+      "cwd": "/path/to/financial-risk-mcp",
+      "env": {
+        "PYTHONPATH": "src"
+      }
+    }
+  }
+}

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "financial-risk-mcp"
+version = "1.0.0"
+description = "High-Performance Quantitative Financial Risk & Analytics Model Context Protocol (MCP) Server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Shelendra Jain", email = "shelendra.jain2004@gmail.com"}
+]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "quantitative-finance",
+    "counterparty-credit-risk",
+    "sa-ccr",
+    "monte-carlo",
+    "pfe",
+    "var",
+    "c++",
+    "ai-agents"
+]
+dependencies = [
+    "numpy>=1.24.0"
+]
+
+[project.scripts]
+financial-risk-mcp = "fin_risk_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
